@@ -1,32 +1,20 @@
-
 import express, { Application, Request, Response } from "express";
 import http from "http";
 import { Server as SocketIOServer } from "socket.io";
 import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
 
-import { Map, Match, Team, Player, CreateMatchParams } from "./types";
+import { CreateMatchParams, Match, Player, Team } from "./types";
+import { MAPS } from "./consts/maps";
+import { WEAPONS } from "./consts/weapons";
 
 let matches: Match[] = [];
-
-const maps: Map[] = [
-    { mapId: 1, name: "Mirage" },
-    { mapId: 2, name: "Dust2" },
-    { mapId: 3, name: "Inferno" },
-    { mapId: 4, name: "Nuke" },
-    { mapId: 5, name: "Overpass" },
-];
-
-const weapons = [
-    { weaponId: 1, name: "USP-S" },
-    { weaponId: 11, name: "AK-47" },
-    { weaponId: 12, name: "AWP" },
-    { weaponId: 15, name: "M4A4" },
-];
+let finishedMatches: Match[] = [];
 
 function getRandomWeaponId(): number {
-    const randIndex = Math.floor(Math.random() * weapons.length);
-    return weapons[randIndex].weaponId;
+    const weaponKeys = Object.keys(WEAPONS);
+    const randomIndex = Math.floor(Math.random() * weaponKeys.length);
+    return Number(weaponKeys[randomIndex]);
 }
 
 function createPlayers(playerNames: string[], teamPlayersCount: number): Player[] {
@@ -38,44 +26,48 @@ function createPlayers(playerNames: string[], teamPlayersCount: number): Player[
             name,
             kills: 0,
             deaths: 0,
-            helps: 0,
-            kd: 0,
+            assists: 0,
             dead: false,
             weaponId: getRandomWeaponId(),
             moneyCount: 800,
+            headshots: 0,
         };
     });
 }
 
+// Создаём матч
 function createMatch(params: CreateMatchParams): Match {
-    // console.log(params);
     const { mapId, team1, team2, teamPlayersCount } = params;
 
-    const foundMap = maps.find((m) => m.mapId === mapId) || maps[0];
+    const foundMap = MAPS[mapId] || MAPS[1];
 
     const match: Match = {
         matchId: uuidv4(),
-        mapId: foundMap.mapId,
+        mapId: foundMap.id,
         timer: 90,
         round: 1,
         roundsHistory: [],
+        mode: teamPlayersCount,
         team1: {
+            name: team1.name,
             side: "CT",
             winRounds: 0,
-            players: createPlayers(team1, teamPlayersCount),
+            players: createPlayers(team1.players, teamPlayersCount),
         },
         team2: {
+            name: team2.name,
             side: "TT",
             winRounds: 0,
-            players: createPlayers(team2, teamPlayersCount),
+            players: createPlayers(team2.players, teamPlayersCount),
         },
         killFeed: [],
+        finished: false,
     };
-    // console.log("create", match)
 
     return match;
 }
 
+// Проверка конца раунда
 function checkRoundEnd(match: Match, io: SocketIOServer): void {
     const aliveTeam1 = match.team1.players.filter((p) => !p.dead).length;
     const aliveTeam2 = match.team2.players.filter((p) => !p.dead).length;
@@ -104,25 +96,43 @@ function checkRoundEnd(match: Match, io: SocketIOServer): void {
 
         match.team1.players.forEach((p) => (p.dead = false));
         match.team2.players.forEach((p) => (p.dead = false));
-
         match.timer = 90;
-        // console.log(match)
 
         io.emit("matchUpdate", match);
+
+        const maxRounds = 24;
+        const team1Wins = match.team1.winRounds;
+        const team2Wins = match.team2.winRounds;
+
+        if (team1Wins === 13 || team2Wins === 13 || match.round > maxRounds) {
+            finishMatch(match, io);
+        }
     }
 }
 
-function simulateKill(io: SocketIOServer) {
-    if (matches.length === 0) return;
+function finishMatch(match: Match, io: SocketIOServer) {
+    match.finished = true;
+    io.emit("matchUpdate", match);
 
-    const randomMatchIndex = Math.floor(Math.random() * matches.length);
-    const match = matches[randomMatchIndex];
+    matches = matches.filter((m) => m.matchId !== match.matchId);
+    finishedMatches.push(match);
+
+    io.emit("matchFinished", match);
+}
+
+function simulateKill(io: SocketIOServer) {
+    const ongoingMatches = matches.filter((m) => !m.finished);
+    if (ongoingMatches.length === 0) return;
+
+    const randomMatchIndex = Math.floor(Math.random() * ongoingMatches.length);
+    const match = ongoingMatches[randomMatchIndex];
     if (!match) return;
 
     const alivePlayers = [
         ...match.team1.players.filter((p) => !p.dead),
         ...match.team2.players.filter((p) => !p.dead),
     ];
+
     if (alivePlayers.length < 2) {
         checkRoundEnd(match, io);
         return;
@@ -130,6 +140,7 @@ function simulateKill(io: SocketIOServer) {
 
     const killerIndex = Math.floor(Math.random() * alivePlayers.length);
     let victimIndex = Math.floor(Math.random() * alivePlayers.length);
+
     while (victimIndex === killerIndex) {
         victimIndex = Math.floor(Math.random() * alivePlayers.length);
     }
@@ -141,27 +152,43 @@ function simulateKill(io: SocketIOServer) {
     victim.deaths += 1;
     victim.dead = true;
 
-    killer.kd = killer.deaths === 0
-        ? killer.kills
-        : parseFloat((killer.kills / killer.deaths).toFixed(2));
+    const isHeadshot = Math.random() < 0.4;
+    if (isHeadshot) {
+        killer.headshots += 1;
+    }
+
+    let assistId: string | undefined;
+    if (Math.random() < 0.4) {
+        const killerInTeam1 = match.team1.players.some((p) => p.id === killer.id);
+        const teammates = killerInTeam1
+            ? match.team1.players.filter((p) => p.id !== killer.id && !p.dead)
+            : match.team2.players.filter((p) => p.id !== killer.id && !p.dead);
+
+        if (teammates.length > 0) {
+            const randomTeammateIndex = Math.floor(Math.random() * teammates.length);
+            const mate = teammates[randomTeammateIndex];
+            mate.assists += 1;
+            assistId = mate.id;
+        }
+    }
 
     match.killFeed.push({
         killerId: killer.id,
         victimId: victim.id,
         weaponId: killer.weaponId,
         timestamp: Date.now(),
+        headshot: isHeadshot,
+        assistId,
     });
 
     if (match.killFeed.length > 15) {
         match.killFeed.shift();
     }
-    // console.log(match)
 
     io.emit("matchUpdate", match);
 
     checkRoundEnd(match, io);
 }
-
 
 const app: Application = express();
 const server = http.createServer(app);
@@ -173,7 +200,6 @@ const io = new SocketIOServer(server, {
 
 app.use(cors());
 app.use(express.json());
-
 
 app.post("/matches", (req: Request<{}, {}, CreateMatchParams>, res: Response) => {
     const { mapId, team1, team2, teamPlayersCount } = req.body;
@@ -192,18 +218,25 @@ app.get("/matches", (req: Request, res: Response) => {
     return res.json(matches);
 });
 
+app.get("/matches/finished", (req: Request, res: Response) => {
+    return res.json(finishedMatches);
+});
+
 app.get("/matches/:id", (req: Request<{ id: string }>, res: Response) => {
     const { id } = req.params;
     const match = matches.find((m) => m.matchId === id);
     if (!match) {
-        return res.status(404).json({ error: "Match not found" });
+        const finished = finishedMatches.find((fm) => fm.matchId === id);
+        if (!finished) {
+            return res.status(404).json({ error: "Match not found" });
+        }
+        return res.json(finished);
     }
     return res.json(match);
 });
 
 io.on("connection", (socket) => {
     console.log("New client connected:", socket.id);
-
     socket.emit("allMatches", matches);
 
     socket.on("disconnect", () => {

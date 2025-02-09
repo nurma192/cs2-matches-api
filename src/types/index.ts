@@ -1,27 +1,23 @@
-// src/types/index.ts
-
-export interface Map {
-    mapId: number;
-    name: string;
-}
 
 export interface Player {
     id: string;
     name: string;
     kills: number;
     deaths: number;
-    helps: number;
-    kd: number;
+    assists: number;
     dead: boolean;
     weaponId: number;
     moneyCount: number;
+    headshots: number;
 }
 
 export interface Team {
+    name: string;
     side: "CT" | "TT";
     winRounds: number;
     players: Player[];
 }
+
 
 export interface Match {
     matchId: string;
@@ -29,14 +25,23 @@ export interface Match {
     timer: number;
     round: number;
     roundsHistory: number[];
+    mode: number;
     team1: Team;
     team2: Team;
-    killFeed: KillEvent[]; // <--- добавили массив событий
+    killFeed: KillEvent[];
+    finished?: boolean;
 }
+
 export interface CreateMatchParams {
     mapId: number;
-    team1: string[];
-    team2: string[];
+    team1: {
+        name: string;
+        players: string[];
+    }
+    team2: {
+        name: string;
+        players: string[];
+    }
     teamPlayersCount: number;
 }
 
@@ -45,5 +50,16 @@ export interface KillEvent {
     victimId: string;
     weaponId: number;
     timestamp: number;
+    headshot?: boolean;
+    assistId?: string;
 }
 
+export interface Weapon {
+    id: number;
+    name: string;
+}
+
+export interface Map {
+    id: number;
+    name: string;
+}
