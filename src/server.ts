@@ -4,7 +4,7 @@ import { Server as SocketIOServer } from "socket.io";
 import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
 
-import { CreateMatchParams, Match, Player, Team } from "./types";
+import {CreateMatchParams, KillEvent, Match, Player, Team} from "./types";
 import { MAPS } from "./consts/maps";
 import { WEAPONS } from "./consts/weapons";
 
@@ -35,7 +35,6 @@ function createPlayers(playerNames: string[], teamPlayersCount: number): Player[
     });
 }
 
-// Создаём матч
 function createMatch(params: CreateMatchParams): Match {
     const { mapId, team1, team2, teamPlayersCount } = params;
 
@@ -62,12 +61,11 @@ function createMatch(params: CreateMatchParams): Match {
         },
         killFeed: [],
         finished: false,
+        currentRoundKillEvents: []
     };
 
     return match;
 }
-
-// Проверка конца раунда
 function checkRoundEnd(match: Match, io: SocketIOServer): void {
     const aliveTeam1 = match.team1.players.filter((p) => !p.dead).length;
     const aliveTeam2 = match.team2.players.filter((p) => !p.dead).length;
@@ -83,7 +81,14 @@ function checkRoundEnd(match: Match, io: SocketIOServer): void {
 
         if (winningTeam) {
             winningTeam.winRounds += 1;
-            match.roundsHistory.push(winningTeam === match.team1 ? 1 : 2);
+
+            match.roundsHistory.push({
+                round: match.round,
+                team1WinRounds: match.team1.winRounds,
+                team2WinRounds: match.team2.winRounds,
+                team1Win: winningTeam === match.team1,
+                killEvents: match.currentRoundKillEvents
+            });
         }
 
         match.round += 1;
@@ -107,6 +112,8 @@ function checkRoundEnd(match: Match, io: SocketIOServer): void {
         if (team1Wins === 13 || team2Wins === 13 || match.round > maxRounds) {
             finishMatch(match, io);
         }
+
+        match.currentRoundKillEvents = [];
     }
 }
 
@@ -132,21 +139,37 @@ function simulateKill(io: SocketIOServer) {
         ...match.team1.players.filter((p) => !p.dead),
         ...match.team2.players.filter((p) => !p.dead),
     ];
-
     if (alivePlayers.length < 2) {
         checkRoundEnd(match, io);
         return;
     }
 
     const killerIndex = Math.floor(Math.random() * alivePlayers.length);
-    let victimIndex = Math.floor(Math.random() * alivePlayers.length);
+    const killer = alivePlayers[killerIndex];
 
-    while (victimIndex === killerIndex) {
-        victimIndex = Math.floor(Math.random() * alivePlayers.length);
+    const killerInTeam1 = match.team1.players.some((p) => p.id === killer.id);
+
+    const teamKill = Math.random() < 0.05;
+
+    let potentialVictims: Player[];
+    if (teamKill) {
+        potentialVictims = killerInTeam1
+            ? match.team1.players.filter((p) => !p.dead && p.id !== killer.id)
+            : match.team2.players.filter((p) => !p.dead && p.id !== killer.id);
+    } else {
+        potentialVictims = killerInTeam1
+            ? match.team2.players.filter((p) => !p.dead)
+            : match.team1.players.filter((p) => !p.dead);
     }
 
-    const killer = alivePlayers[killerIndex];
-    const victim = alivePlayers[victimIndex];
+    if (potentialVictims.length === 0) {
+        checkRoundEnd(match, io);
+        return;
+
+    }
+
+    const victimIndex = Math.floor(Math.random() * potentialVictims.length);
+    const victim = potentialVictims[victimIndex];
 
     killer.kills += 1;
     victim.deaths += 1;
@@ -159,36 +182,42 @@ function simulateKill(io: SocketIOServer) {
 
     let assistId: string | undefined;
     if (Math.random() < 0.4) {
-        const killerInTeam1 = match.team1.players.some((p) => p.id === killer.id);
         const teammates = killerInTeam1
             ? match.team1.players.filter((p) => p.id !== killer.id && !p.dead)
             : match.team2.players.filter((p) => p.id !== killer.id && !p.dead);
 
         if (teammates.length > 0) {
-            const randomTeammateIndex = Math.floor(Math.random() * teammates.length);
-            const mate = teammates[randomTeammateIndex];
+            const mateIndex = Math.floor(Math.random() * teammates.length);
+            const mate = teammates[mateIndex];
             mate.assists += 1;
             assistId = mate.id;
         }
     }
 
-    match.killFeed.push({
-        killerId: killer.id,
-        victimId: victim.id,
+    const killEvent: KillEvent = {
+        killerName: killer.name,
+        killerSide: killerInTeam1 ? match.team1.side : match.team2.side,
+        victimName: victim.name,
+        victimSide: killerInTeam1 ? match.team2.side : match.team1.side,
         weaponId: killer.weaponId,
         timestamp: Date.now(),
         headshot: isHeadshot,
         assistId,
-    });
-
+    };
+    match.killFeed.push(killEvent);
     if (match.killFeed.length > 15) {
         match.killFeed.shift();
     }
+
+    match.currentRoundKillEvents.push(killEvent);
 
     io.emit("matchUpdate", match);
 
     checkRoundEnd(match, io);
 }
+
+
+
 
 const app: Application = express();
 const server = http.createServer(app);
