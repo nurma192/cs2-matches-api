@@ -61,7 +61,8 @@ function createMatch(params: CreateMatchParams): Match {
         },
         killFeed: [],
         finished: false,
-        currentRoundKillEvents: []
+        currentRoundKillEvents: [],
+        createdAt: new Date(),
     };
 
     return match;
